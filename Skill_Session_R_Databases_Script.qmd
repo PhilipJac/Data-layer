@@ -1,0 +1,570 @@
+---
+title: "Skill session: R and databases, 2024-04-08, SLU Aqua"
+author: "Philip Jacobson"
+format: html
+date: today
+embed-resources: true
+editor: visual
+code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+## R and databases
+
+This skill session will focus on how we can connect and work against some of our databases at SLU Aqua directly using R. I will show examples for three databases:
+
+1.  SERS, Electrofishing data
+
+2.  KUL, Coastal fishing data
+
+3.  NORS, Gillnet fishing data from lakes
+
+And I will talk about FD2 and Sötebasen in the end of the session.
+
+## Databases at SLU Aqua
+
+We have many different databases at SLU Aqua at the different labs. Import and export to these varies and below is a schematic picture showing the flow from data-in to data-out (Fig. 1).
+
+![](Datalager_schematic.png)
+
+*Figure 1. A schematic image showing the data flow from collection to end-users for some of the databases we have at SLU Aqua. Image made by Peter Ljungberg.*
+
+## The Data layer/Datalagret
+
+This is where the magic happens. In the Data layer/Datalagret, we can access the databases that has an arrow to it in the schematic figure above using R -\> NORS, SERS, KUL, FD2 (Fig. 1).
+
+Lets start with some examples extracting data from SERS.
+
+### SERS - Electrofishing data
+
+SERS is a database containing electrofishing data, accessible via SLU Aqua and our homepage ([SLU Aqua SERS Karttjänst](https://dvfisk.slu.se/karta "Click to be redirected")). You can use the available map-service to find sites and to download data (Fig. 2).
+
+![](SERS_Skärmklipp.JPG)
+
+*Figure 2. Showing an example of how to use the map-service to extract data from SERS. URL: [DVFisk (slu.se)](https://dvfisk.slu.se/karta "Link to the SLU Aqua map service to extract data").*
+
+However, we can extract data from SERS via the data layer using R:
+
+## Connect to the data layer
+
+```{r}
+## Load needed packages ###
+
+library(DBI)
+library(odbc) 
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(dbplyr)
+library(ggridges)
+library(leaflet)
+library(sf)
+library(ggmap)
+library(mapproj)
+library(ggrepel)
+library(flextable)
+```
+
+```{r}
+####
+#Connect to the data-layer:
+
+AQ_con <- dbConnect(odbc(), 
+                    Driver = "SQL Server", 
+                    Server = "aquadw_prod.db.slu.se", 
+                    USER = "phja0001",
+                    Database = "AquaDW_prod", 
+                    Trusted_Connection = "True",
+                    encoding = "utf-8")
+```
+
+If you have access, you should now see the AquaDW_prod server up in the top-right corner of Rstudio (Fig. 3). I will switch to RStudio and show you this.
+
+![](Aqua_prod_Rstudio.PNG){width="413"}
+
+*Figure 3. Rstudio print-screen of the data-layer connection.*
+
+*Switch to Rstudio*
+
+### Extract data from SERS
+
+There are a few tables within SERS that I have used, I will now show how to extract catch data and individual length data from:
+
+1.  One specific site
+
+2.  One watershed
+
+3.  Selected sites in various watersheds
+
+**Data from one site:**
+
+```{r}
+### Densities all species and years for a site:
+
+fangst_SERS_catches <- dbGetQuery(AQ_con,"select * from AquaDW_prod.mart.SERS_ELFANGST where Lokalnamn = '6463737-1271667 Nedre Aröd ny'")
+
+fangst_SERS_catches %>% 
+            gather(Täthetstyp, Täthet, 40:41) %>% 
+  ggplot(., aes(x=Fiskeår, y=Täthet, colour=Täthetstyp))+
+  geom_line()+
+  geom_point()+
+  facet_wrap(~Lokalnamn*Art, scales="free_y")
+
+## Length distribution, all species and years for a site:
+
+fangst_SERS_individ <- dbGetQuery(AQ_con,"select * from AquaDW_prod.mart.SERS_ELFANGST_INDIVID where Lokalnamn = '6463737-1271667 Nedre Aröd ny'")
+
+Plot<-fangst_SERS_individ %>% 
+  ggplot(., aes(x=Längd, y=as.factor(as.character(Fiskeår))))+ 
+  geom_density_ridges2(quantile_lines = TRUE, quantiles = 2)+
+  xlab("Längd (mm)")+
+  ylab("Fiskeår")+
+  theme_bw()+
+  facet_wrap(~Art, scales="free")
+
+Plot
+```
+
+**Data from one watershed (Skeboån):**
+
+All species
+
+```{r}
+fangst_SERS_catches_watershed <- dbGetQuery(AQ_con,"select * from AquaDW_prod.mart.SERS_ELFANGST where Huvudavrinningsomr = '57 Skeboån'")
+
+fangst_SERS_catches_watershed %>% 
+            gather(Täthetstyp, Täthet, 40:41) %>% 
+  ggplot(., aes(x=Fiskeår, y=Täthet, colour=Täthetstyp))+
+  geom_line()+
+  geom_point()+
+  facet_grid(Lokalnamn~Art, scales="free")
+```
+
+Subset of species:
+
+```{r}
+fangst_SERS_catches_watershed %>% 
+            gather(Täthetstyp, Täthet, 40:41) %>% 
+  filter(Art %in% c("Öring", "Mört", "Abborre")) %>% 
+  ggplot(., aes(x=Fiskeår, y=Täthet, colour=Täthetstyp))+
+  geom_line()+
+  geom_point()+
+  facet_grid(Lokalnamn~Art, scales="free")
+```
+
+Each site can also be plotted on a map as we have coordinates in the SERS database:
+
+```{r}
+# Plot the stations on a map:
+
+# in SERS, you have coordinates in RT90 and S99TM, convert to WGS 84 and then plot:
+
+Convert_coordinate<- fangst_SERS_catches_watershed %>%
+  st_as_sf(crs = 3006, coords = c("x" = "Elfiskelokal S99TM_E", "y" = "Elfiskelokal S99TM_N"), remove = F) %>%
+  st_transform(crs = 4326) # WGS 84 system
+
+coords <- st_coordinates(Convert_coordinate)# Convert into a df with only coordinates
+
+fangst_SERS_catches_watershed<-fangst_SERS_catches_watershed %>% 
+  mutate(long = coords[,1],
+         lat = coords[,2]) # Combine df with converted coordinates
+
+# Make an interactive map using leaflet:
+
+basemap <- leaflet() %>%
+  # add different provider tiles
+  addProviderTiles("OpenStreetMap") %>% 
+  #addMarkers(data=Coordinates_sites_wanted, lng = ~Long, lat = ~Lat, label = ~Typ)
+  addAwesomeMarkers(data=fangst_SERS_catches_watershed, lng = ~long, lat = ~lat,
+                    label = ~ Lokalnamn)
+
+basemap
+```
+
+**Selected sites in various watersheds:**
+
+These are the electro-fishing sites included in the eel DCF program.
+
+```{r}
+fangst_SERS_tatheter <- dbGetQuery(AQ_con,"select * from AquaDW_prod.mart.SERS_ELFANGST where 
+                            Lokalnamn = '6463737-1271667 Nedre Aröd ny' OR
+                            Lokalnamn = '6141980-1356940 Hörte hamn' OR
+                            Lokalnamn = '6172760-1339870 Bjällerups kvarn' OR
+                            Lokalnamn = '6371190-1270560 Skolan uppstr bro' OR
+                            Lokalnamn = '6430280-1261420 Utlopp vid fallet' OR
+                            Lokalnamn = '6301730-1305000 Nedstr spången' OR
+                            Lokalnamn = '6520990-1255424 Sundshult' OR
+                            Lokalnamn = '6186250-1338470 Håstad mölla 59-8' OR
+                            Lokalnamn = '6187340-1336650 L Harrie Kä-4' OR
+                            Lokalnamn = '6360870-1283430 Ned utl Kroksjöbäcke' OR
+                            Lokalnamn = '6147640-1381390 Övningsfältet' OR
+                            Lokalnamn = '6242780-1317290 Östra kvarn' OR
+                            Lokalnamn = '6544553-1233645 Ned Hjälpebron ny' OR
+                            Lokalnamn = '6353810-1290580 Kullagård-biotop' OR
+                            Lokalnamn = '6492200-1259350 Kröken'")
+
+# get rid of anyoing spaces in colum names:
+fangst_SERS_tatheter$Täthet_per_100m<-fangst_SERS_tatheter$'Täthet äldre än årsungar'
+fangst_SERS_tatheter$ykoordinat<-fangst_SERS_tatheter$'Vattendrag ykoord'
+fangst_SERS_tatheter$Elfiskelokal_S99TM_N<-fangst_SERS_tatheter$'Elfiskelokal S99TM_N'
+fangst_SERS_tatheter$Elfiskelokal_S99TM_E<-fangst_SERS_tatheter$'Elfiskelokal S99TM_E'
+
+## Add year with 0 eel catches:
+
+fangst_SERS_tatheter_2011_all<-fangst_SERS_tatheter %>% 
+  filter(Fiskeår>=2011) %>%
+ group_by(Huvudavrinningsomr, Vattendragsnamn, Lokalnamn,Elfiskelokal_S99TM_N, Elfiskelokal_S99TM_E, Fiskeår, Art) %>% 
+  reframe(Täthet=Täthet_per_100m)
+
+# Filter out eel, then combine with original df and then convert NA to 0 
+
+fangst_SERS_tatheter_2011_Eel<-fangst_SERS_tatheter %>% 
+  filter(Art=="Ål",
+         Fiskeår>=2011) %>% 
+  group_by(Huvudavrinningsomr, Vattendragsnamn,Lokalnamn,Elfiskelokal_S99TM_N, Elfiskelokal_S99TM_E, Fiskeår, Art) %>% 
+  reframe(Täthet=Täthet_per_100m)
+
+fangst_SERS_tatheter_2011_Eel_with_zero_catch<-left_join(fangst_SERS_tatheter_2011_all, fangst_SERS_tatheter_2011_Eel, by=c("Huvudavrinningsomr","Lokalnamn", "Elfiskelokal_S99TM_N", "Elfiskelokal_S99TM_E","Fiskeår")) %>% 
+  mutate(Täthet_per_100_m_med_0 = ifelse(is.na(Täthet.y), 0, Täthet.y)) %>% 
+  group_by(Huvudavrinningsomr, Vattendragsnamn.x, Lokalnamn, Elfiskelokal_S99TM_N, Elfiskelokal_S99TM_E, Fiskeår) %>% 
+  summarise(Täthet_ål_per_100m_med_0=mean(Täthet_per_100_m_med_0),
+            Art="Ål")
+
+## Plot data including years with true zero eel catches:
+
+fangst_SERS_tatheter_2011_Eel_with_zero_catch %>% 
+    ggplot(., aes(x=Fiskeår, y=as.numeric(Täthet_ål_per_100m_med_0), group_by(Lokalnamn)))+
+  geom_point(aes(colour=Lokalnamn))+
+  geom_line(aes(colour=Lokalnamn))+
+  ylab("Eel densities per 100m")+
+  xlab("Year")+
+  theme_bw()+
+  labs(colour="Site")+
+  scale_x_continuous(breaks=2011:2023, name="Year")
+
+## Zoomed in plot:
+
+fangst_SERS_tatheter_2011_Eel_with_zero_catch %>% 
+    ggplot(., aes(x=Fiskeår, y=as.numeric(Täthet_ål_per_100m_med_0), group_by(Lokalnamn)))+
+  geom_point(aes(colour=Lokalnamn))+
+  geom_line(aes(colour=Lokalnamn))+
+  ylab("Eel densities per 100m")+
+  xlab("Year")+
+  theme_bw()+
+  ylim(0,100)+
+  labs(colour="Site")+
+  scale_x_continuous(breaks=2011:2023, name="Year")
+
+```
+
+Calculate the mean density of eel per site and number of fishing events in a table and on a map:
+
+#### Tabell 1. Mean densities of eel per 100 m (± 1 S.D.) since 2011 for each site included in the eel DCF monitoring program.
+
+```{r}
+# Calculate mean density per site and number of years with data since 2011 in a table and on a map:
+
+Data_to_map<-fangst_SERS_tatheter_2011_Eel_with_zero_catch %>% 
+  group_by(Huvudavrinningsomr, Lokalnamn, Elfiskelokal_S99TM_E, Elfiskelokal_S99TM_N) %>% 
+  summarise(mean_eel_density_per_100m=mean(Täthet_ål_per_100m_med_0, na.rm=T),
+            sd_eel_density_per_100m=sd(Täthet_ål_per_100m_med_0, na.rm=T),
+            Years_with_data=n())
+
+## Make a flextable: 
+
+Tabell_1<- flextable(Data_to_map, 
+  col_keys=c("Huvudavrinningsomr","Lokalnamn", "Years_with_data", "Dummy1")) %>% 
+  mk_par(j="Dummy1",
+    value=as_paragraph(fmt_avg_dev(avg=mean_eel_density_per_100m, 
+                                   dev=sd_eel_density_per_100m))) %>% 
+  set_header_labels(Dummy1 = "Mean eel density per 100m (± 1 S.D)",
+                    Years_with_data = "Years with data",
+                    Lokalnamn="Site",
+                    Huvudavrinningsomr="Watershed") %>% 
+  autofit()
+    
+Tabell_1
+```
+
+Plot table data on a map:
+
+```{r}
+# Show mean density per site and nmber of years with data since 2011 on a map:
+
+Data_to_map<-fangst_SERS_tatheter_2011_Eel_with_zero_catch %>% 
+  group_by(Lokalnamn, Elfiskelokal_S99TM_E, Elfiskelokal_S99TM_N) %>% 
+  summarise(mean_eel_density_per_100m=mean(Täthet_ål_per_100m_med_0, na.rm=T),
+            Years_with_data=n())
+
+Convert_coordinate_eel<- Data_to_map %>%
+  st_as_sf(crs = 3006, coords = c("x" = "Elfiskelokal_S99TM_E", "y" = "Elfiskelokal_S99TM_N"), remove = F) %>%
+  st_transform(crs = 4326) 
+
+coords_eel <- st_coordinates(Convert_coordinate_eel)# Convert into a df with only coordinates
+
+Data_to_map<-Data_to_map %>% 
+  ungroup() %>% 
+  mutate(long = coords_eel[,1],
+         lat = coords_eel[,2])
+
+Sweden <- map_data("world", region = c("Sweden"))
+
+ggplot(Sweden, aes(x = long, y = lat)) +
+  geom_polygon(aes(group = group), colour="black", fill="lightgrey")+
+  geom_point(data=Data_to_map, shape=21, aes(fill=Years_with_data, size=mean_eel_density_per_100m))+
+ # scale_size_viridis_d()+
+  # theme_void()+http://127.0.0.1:46285/graphics/plot_zoom_png?width=1536&height=814
+  theme(legend.position = "none")+
+  #coord_map()+
+  coord_quickmap()+
+  ylim(55,59.5)+
+  xlim(10,19)+
+  theme_bw()+
+  geom_text_repel(data=Data_to_map, aes(label = Lokalnamn), 
+                  size=2, nudge_y=0.2, nudge_x=0.2)+
+  ylab("Latitude")+
+  xlab("Longitude")+
+  theme(axis.text = element_text(size = 10))+
+  theme(axis.title = element_text(size = 10))+
+  scale_fill_gradient(low = "orange", high = "darkorchid")+
+  scale_size_continuous(range = c(3,11))+
+  theme(legend.position = "top")
+```
+
+Make a ROM-figure (according to instructions here ([ROM-sharepoint](https://arbetsplats.slu.se/sites/aqua/Projekt/aquarom/Delade%20dokument/Forms/AllItems.aspx?id=%2Fsites%2Faqua%2FProjekt%2Faquarom%2FDelade%20dokument%2FAqua%5FROM%2F1%2E%20L%C3%A4s%20detta%20f%C3%B6rst%21%2FInstruktioner%2FFigurer "ROM sharepoint"))) showing annual mean densities over time with 95% conf-interval:
+
+```{r}
+## Load the ROM-theme and palette Max Lindmark has made:
+
+theme_rom <- function(base_size = 12, base_family = "") {
+theme_bw(base_size = 12, base_family = "") +
+theme(
+axis.text = element_text(size = 8),
+axis.title = element_text(size = 8),
+axis.ticks.length = unit(0.05, "cm"),
+axis.line = element_line(colour = "black",size = 0.3),
+text = element_text(family = "sans"),
+panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(),
+panel.border = element_blank(),
+plot.title = element_text(hjust = 0.5,
+margin = margin(b = -3),
+size = 9.6,
+face = "bold"),
+legend.position = "bottom",
+legend.text = element_text(size = 8),
+legend.background = element_rect(fill = "transparent"),
+legend.key = element_rect(fill = "transparent"),
+legend.box.margin = margin(-25,-25,-25,-25),
+aspect.ratio = 1,
+plot.margin = unit(c(5.5, 5.5, 20, 5.5),
+"points")
+)
+}
+# And also replace points with commas in the plot
+#options(OutDec= ",")
+
+pal <- c("#56B4E9", "#009E73", "#F0E442", "#0072B2", "#E69F00", "#D55E00")
+
+# Calc mean and 95 conf-interval and plot the data:
+
+Data_to_ROM_fig<-fangst_SERS_tatheter_2011_Eel_with_zero_catch %>% 
+  group_by(Fiskeår) %>% 
+  summarise(mean_eel_density_per_100m=mean(Täthet_ål_per_100m_med_0, na.rm=T),
+            sd_eel_density_per_100m=sd(Täthet_ål_per_100m_med_0, na.rm=T),
+            N_sites=n()) %>% 
+  mutate(Confidence_intervall_95=qt(0.975, df=N_sites-1)*sd_eel_density_per_100m/sqrt(N_sites))
+
+ROM_plot<-Data_to_ROM_fig %>% 
+ggplot(., aes(x=Fiskeår, y=mean_eel_density_per_100m))+
+  geom_errorbar(aes(x = Fiskeår, 
+            ymin = mean_eel_density_per_100m-Confidence_intervall_95, 
+            ymax = mean_eel_density_per_100m+Confidence_intervall_95), 
+    width=1, colour="#56B4E9")+
+  geom_point(colour="#56B4E9")+
+  theme_rom()+
+  ylab("Mean eel density per 100m")+
+  xlab(NULL)
+
+ROM_plot
+```
+
+One can also utilize ArcGISPro and R using various "bridge" packages to visualize data. Here are a two examples that Duncan has made (PhD student at Slab), one for [eel](https://www.arcgis.com/apps/dashboards/9c180abc89a3482fa7da3eea7c6f95ed "Sers eel desktop") and for [all data](https://www.arcgis.com/apps/dashboards/73ec849b5d444d159ceff220d2bbd65b "All data SERS") in the SERS database. Using the data-layer and a "bridge package" one could make the whole database available for users in a very quick and neat way. You could also do a ShinyApp connected to the data layer like this [one](http://185.135.126.250:8080/shiny_dv/ "ICES WGEEL Shiny-app"), Mårten will talk about ShinyApps in another Skill Session.
+
+# KUL - Database for coastal fish
+
+In KUL, we have data from different fishing activities and individual fish data which we can access via the data-layer.
+
+![](bild_KUL.jfif){width="617"}
+
+I will first show how KUL looks like in Rstudio, then visualize CPUE from the glas eel fishing at the inlet channel to Ringhals nuclear power plant, perch length-age data and then switch to the developed eel fiskbarometern script and show some more advanced data exports and documentation.
+
+*Switch to Rstudio*
+
+#### Glas eel catches at the Ringhals Nuclear Intake Channel
+
+```{r}
+fangst_glaseel_Ringhals<- dbGetQuery(AQ_con,"select * from AquaDW_prod.mart.KUL_FANGST_NEW where Artbestämning = 'Glasål' AND Lokal_ID = 105")
+#View(fangst_glaseel_Ringhals)
+
+#View(fangst_glaseel_Ringhals)
+# without disturbed catches:
+Glaseel_Ringhals_Summary_tabel_no_disturbed<-fangst_glaseel_Ringhals %>% 
+  filter(Störning=="NEJ") %>% 
+  group_by(År) %>% 
+  summarise(Effort_undisturbed=sum(Ansträngning_ostört),
+            Effort_including_disturbed=sum(Ansträngning), # should be the sme if the filter function works!
+            Total_catch_numbers=sum(Antal),
+            Total_catch_biomass=sum(Vikt_uppmätt),
+            lat=mean(Lat_grader),
+            long=mean(Long_grader)) %>% 
+  mutate(CPUE_n=Total_catch_numbers/Effort_undisturbed,
+         CPUE_biomass=Total_catch_biomass/Effort_undisturbed) %>% 
+  mutate(Effort_unit="Fishing hours") %>% 
+  mutate(Location_name="Ringhals") %>% 
+  mutate(Location_ID=105) %>% 
+  mutate(Year=År)
+
+# Plot the data:
+
+ggplot(Glaseel_Ringhals_Summary_tabel_no_disturbed, aes(x=Year, y=CPUE_n))+
+  geom_line(size=1, colour="#56B4E9")+
+  #geom_point(shape=21, fill="#56B4E9", colour="black", stroke=1, size=3)+
+  theme_rom()+
+  ylab("CPUE (glaseel per fishing hour)")+
+  xlab("Year")+
+  geom_hline(yintercept=mean(Glaseel_Ringhals_Summary_tabel_no_disturbed$CPUE_n), colour="#009E73")
+
+# And then map out the site location based on coordinates in KUL for each year :
+
+basemap <- leaflet() %>%
+  # add different provider tiles
+  addProviderTiles("OpenStreetMap") %>% 
+  #addMarkers(data=Coordinates_sites_wanted, lng = ~Long, lat = ~Lat, label = ~Typ)
+  addAwesomeMarkers(data=Glaseel_Ringhals_Summary_tabel_no_disturbed, 
+                    lng = ~long, lat = ~lat,
+                    label = ~ År)
+
+basemap
+
+```
+
+#### Perch length at weight (total and somatic) data for female perch (\>110 000 individuals):
+
+```{r}
+All_perch_Ind_data_KUL <- dbGetQuery(AQ_con,"select * from AquaDW_prod.mart.KUL_INDIVID_NEW where Art ='Abborre'")
+
+TotW_vs_SomaW_Abbo<-All_perch_Ind_data_KUL %>% 
+  select(Artbestämning, Kön, Lokal, Godkänt_prov, Slutlängd_cm, Somatisk_vikttyp, Totalvikt_gram, Somatisk_vikt) %>% 
+  gather(key="Vikt_typ", value="vikt", 7:8)
+
+TotW_vs_SomaW_Abbo %>%
+  filter(Kön=="Hona") %>% 
+  ggplot(., aes(x=as.numeric(Slutlängd_cm), y=as.numeric(vikt), colour=Vikt_typ, group=Vikt_typ))+
+  geom_point()+
+  stat_smooth(method="loess", se=FALSE)+
+  ylab("Vikt")+
+  xlab("Längd")
+```
+
+#### Eel fiskbarometern script:
+
+Open qmd HTML file for the eel [RoM](\storage-dh.slu.se\restricted$\Ålen\RoM\2023 "Eel RoM html script")
+
+# NORS
+
+I have not worked with NORS but we have started at Sölab to test how well it works. We can access data from various tables like I showed earlier, here is one example extracting all catch data from 2019:
+
+```{r}
+fangst_NORS_2019 <- dbGetQuery(AQ_con,"select * from AquaDW_prod.mart.NORS_SJO_FANGST where Fiskeår = 2019")
+names(fangst_NORS_2019)
+sort(unique(fangst_NORS_2019$Art)) 
+```
+
+And then one can extract individual data from another table within the NORS database:
+
+```{r}
+Ind_data_NORS_2019 <- dbGetQuery(AQ_con,"select * from AquaDW_prod.mart.NORS_SJO_INDIVID where Fiskeår = 2019")
+names(Ind_data_NORS_2019)
+```
+
+And then make a summary table of selected species:
+
+```{r}
+
+Summary_table_Nors<-Ind_data_NORS_2019 %>% 
+  group_by(Art,Huvudavrinningsomr, Fiskeår) %>% 
+summarise(Mean_length=mean(Längd),
+          SD_length=sd(Längd),
+          Number_of_fish=n()) %>% 
+  filter(Art %in% c("Abborre", "Röding", "Öring"))
+  
+## Make a flextable: 
+
+Tabell_2<- flextable(Summary_table_Nors, 
+  col_keys=c("Art","Huvudavrinningsomr", "Dummy1", "Number_of_fish")) %>% 
+  mk_par(j="Dummy1",
+    value=as_paragraph(fmt_avg_dev(avg=Mean_length, 
+                                   dev=SD_length))) %>% 
+  set_header_labels(Dummy1 = "Mean length (± 1 S.D)",
+                    Huvudavrinningsomr="Watershed",
+                    Number_of_fish="Number of individuals") %>% 
+  autofit()
+    
+Tabell_2
+```
+
+Then, as we have coordinates one can plot sites etc etc, just like I did for SERS and KUL.
+
+# FD2 and Sötebasen
+
+**FD2** can be accessed via R and the data-layer. However, the eel data we use that is collected at Hlab is available in the ICES database DATRAS and Eggs & Larvae from where we fetch the data right now. We have not started to work with the DB-group at Hlab to develop this framework for FD2 yet.
+
+**Sötebasen** is an 32-bit access database which can be accessed suing R but is not that straight forward. I have made a guide for it using an old 32-bit version of R that should work ([R and Sötebasen PDF](\storage-og.slu.se\home$\phja0001\My%20Documents\Philip\Researcher%20SLU\R "R and Sötebasen PDF")), but it is not ideal.
+
+# Final notes on using R and the data-layer
+
+Using R and the data-layer to connect to our databases, we can develop scripts that anyone can use, guarantee transparent and traceable data exports from our databases and we can include information about the data in a text format, like we have done in the fiskbarometern script fro eel. It is possible to generate figures and tables and conduct data analysis for e.g. fact sheets and fiskbarometern directly from our databases, especially now since Fiskbarometern is a digital product ([fiskbarometern](https://fiskbarometern.se/rapport/2023/species/%C3%85l "Fiskbarometern ål 2023")), such work has been initiated for Fiskbarometern at Klab this year. One could also automatize various annual reports using qmd-scripts to produce this types of [fact sheets](https://pub.epsilon.slu.se/28424/1/heimbrand-y-et-al-20220707.pdf "Faktablad från Integrerad kustfiskövervakning 2022:4 Torhamn, södra Egentliga Östersjön, 2002–2021"), using mardown scripts like this one. We in the "eel group" also use it produce correctly formatted excel-sheets to the annual ICES WGEEL data-call.
+
+We started this work in 2022 under the "DCF umbrella" and I would like to send a special thanks to Peter Ljungberg for all the help in getting this work started and support when developing scripts.
+
+# Feel uncertain about R-coding - use AI!
+
+Here is one example of code that was generated using ChatGPT4 (pay-version) using one prompt:
+
+"Hi, can you help me generate R-code for a open source map showing lat long (WGS84) and circles?"
+
+Answer:
+
+```{r}
+# Example dataframe with latitudes, longitudes, and radiuses
+locations<- data.frame(
+  lat = c(40.7128, 34.0522, 41.8781),
+  lon = c(-74.0060, -118.2437, -87.6298),
+  radius = c(50000, 30000, 40000) # Radius in meters
+)
+
+# Create a leaflet map
+map <- leaflet() %>%
+  addTiles() %>%  # Add default OpenStreetMap map tiles
+  setView(lng = mean(locations$lon), lat = mean(locations$lat), zoom = 4)
+
+# Add circles to the map
+for(i in 1:nrow(locations)) {
+  map <- map %>%
+    addCircles(
+      lng = locations$lon[i], lat = locations$lat[i],
+      radius = locations$radius[i],
+      color = 'purple', fillColor = 'purple',
+      fillOpacity = 0.5, weight = 1
+    )
+}
+
+# Print the map
+map
+
+```
+
+## Ending of Skill session -\> time for questions
